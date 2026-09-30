@@ -1,0 +1,46 @@
+{
+  "eca-goal-claim": {
+    "type": "preRequest",
+    "description": "eca-goal: /goal, /goal-resume and /goal-pause typed by you claim, resume or pause the goal",
+    "visible": false,
+    "actions": [
+      {
+        "type": "shell",
+        "file": "@HOOKS_DIR@/eca-goal-claim.sh"
+      }
+    ]
+  },
+  "eca-goal-loop": {
+    "type": "postRequest",
+    "description": "eca-goal: run the goal check, verify claims, follow up until done",
+    "actions": [
+      {
+        "type": "shell",
+        "file": "@HOOKS_DIR@/eca-goal-loop.sh",
+        "timeout": 1200000
+      }
+    ]
+  },
+  "eca-goal-context-compact": {
+    "type": "postCompact",
+    "description": "eca-goal: re-inject the active goal after compaction",
+    "visible": false,
+    "actions": [
+      {
+        "type": "shell",
+        "file": "@HOOKS_DIR@/eca-goal-context.sh"
+      }
+    ]
+  },
+  "eca-goal-context-start": {
+    "type": "chatStart",
+    "description": "eca-goal: inject the active goal when a chat starts",
+    "visible": false,
+    "actions": [
+      {
+        "type": "shell",
+        "file": "@HOOKS_DIR@/eca-goal-context.sh"
+      }
+    ]
+  }
+}
