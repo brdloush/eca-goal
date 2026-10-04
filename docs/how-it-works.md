@@ -14,25 +14,25 @@ eca-goal uses only standard ECA features: custom commands and hooks. You do not 
 4. **Mechanical checks.** On a claim, the hook checks, in this order:
    1. the proof format: one section per item, a valid `method:`, `evidence:`, and `command:` lines where needed. A bad format is sent back with the list of problems (this does not count as a rejected claim);
    2. the check command;
-   3. every `command:` line of the proof, run by the hook itself;
+   3. every `command:` line of the proof, run by the hook itself (a command listed for several items runs once; items with `method: check` need nothing extra, the check covers them);
    4. the optional LLM judge. It gets only text (the items, the proof, the check output, the agent's last message): no files, no tools, no tool calls from the chat; see [Configuration](configuration.md#optional-llm-judge).
 
-   If one of them fails, the claim is **rejected**: the agent gets the reason and goes back to work.
-5. **Verification turn.** If all mechanical checks pass, the hook starts one verification turn. The agent must start **one fresh reviewer** subagent (`eca__spawn_agent`, `general`). The reviewer gets only the Objective, the "Done when" items, the proof and its own earlier reviews, not the chat history. It inspects the repo itself, gives `ok` / `not-ok` per item, and looks for concrete errors in what the goal produced (a wrong fact, a wrong `file:line` reference, a broken example, code that does not work). It sorts every problem into one of two classes:
+   If one of them fails, the agent gets the reason and goes back to work. A failing check or proof command is **not** counted as a rejected claim: it costs one turn, and the stall rule stops a loop (the same failure 3 times in a row pauses the goal). So the agent does not need to run the check and the proof commands itself before it claims; the hook runs them right after the turn. Only a judge "no" counts as a rejected claim here.
+5. **Verification turn.** If all mechanical checks pass, the hook starts one verification turn. The agent must start **one fresh reviewer** subagent (`eca__spawn_agent`, `general`). The reviewer gets only the Objective, the "Done when" items, the proof and its own earlier reviews, not the chat history. It is also told what the hook already ran on this exact working tree (the check with its time and the last lines of its output, and the number of proof commands), so it does not run them again; it reads them and judges whether they really prove the items. It inspects the repo itself, gives `ok` / `not-ok` per item, and looks for concrete errors in what the goal produced (a wrong fact, a wrong `file:line` reference, a broken example, code that does not work). It sorts every problem into one of two classes:
    - **Blocking:** a "Done when" item is not met, a check is weakened or broken, or the proof claims something false. Only these make an item `not-ok` and fail the verdict.
    - **Minor:** a wrong number or wording in prose, an outdated comment, style. These are listed, but they do not fail the verdict.
 
    Matters of taste and problems outside the "Done when" items are weak points. The agent writes the answer to `.eca/eca-goal/review.md` (see [the review format](writing-goals.md#the-review)). On a pass, it may fix the minor findings in the same turn, but only in prose, docs and comments.
 6. **Done.** The goal is `done` only if the verification turn ends with `verified: yes` in `goal.md`, `review.md` says `verdict: pass` with an empty `## Blocking` list, **and** the check still passes (the hook runs it once more, in case a minor fix broke something). Otherwise the claim is rejected and the reviewer's findings go back to the agent. After 3 rejected claims (`claim_limit`), the goal pauses.
 7. **Later review rounds.** A rejected review is kept as `.eca/eca-goal/review-<N>.md`. The next reviewer gets these files and starts with `## Previous findings`: for each earlier blocking finding, `fixed` or `not fixed`. From round 2 on, a **new** blocking finding must be in something that changed since the earlier review, or serious (an item is not met, a check is broken or weakened, the proof claims something false). Parts that were already reviewed and did not change get minor findings only. So the review converges: fresh eyes find real problems, but the reviewer does not invent a new reason to fail every round. The history survives `/goal-resume`; `/goal` removes it.
-8. At the end, the agent writes 1–5 lessons for this repo to `.eca/rules/eca-goal-lessons.md`. ECA loads every file in `.eca/rules/` as a rule, and `/goal` reads the lessons first. This is how the loop gets better over time.
+8. At the end, the agent writes 1–5 lessons for this repo to `.eca/rules/eca-goal-lessons.md`: about the repo's code, tools, tests and traps, not about the loop's own procedure (the loop's instructions cover that, and they can change). ECA loads every file in `.eca/rules/` as a rule, and `/goal` reads the lessons first. This is how the loop gets better over time.
 9. The **`chatStart` and `postCompact` hooks** (`eca-goal-context.sh`) put the goal back into the context of the owning chat when it starts or resumes, and after compaction. A new chat gets the goal when you type `/goal-resume` in it.
 
 ## Hard, mixed and fluid goals
 
 | Goal | Example | What decides |
 |---|---|---|
-| **Hard** | "all tests in `test/auth` pass" | The check command. The reviewer only confirms that the proof commands really test the items. |
+| **Hard** | "all tests in `test/auth` pass" | The check command. The reviewer only confirms that the proof commands really test the items, and that the check really tests the `method: check` items. |
 | **Mixed** | "refactor X, tests stay green, the code is easier to read" | The check proves the hard part. The reviewer judges "easier to read". |
 | **Fluid** | "every public function in `api/` has a docstring with an example" | No check. The proof and the reviewer decide. |
 
@@ -48,8 +48,8 @@ The loop stops by itself only when continuing is useless. The reason goes into `
 
 | `paused_reason` | When |
 |---|---|
-| `stall` | The check failed 3 times in a row with exactly the same exit code and output (`stall_limit`, default 3). After the 2nd time the agent gets a warning to try a different approach. A check that prints nothing is never counted as a stall. |
-| `claims-rejected` | 3 claims were rejected (`claim_limit`, default 3): a failing check or proof command, a judge "no", or a failed verification. The goal is probably unclear or too hard. Read `review.md`, sharpen the "Done when" items, then `/goal-resume`. |
+| `stall` | The check failed 3 times in a row with exactly the same exit code and output (`stall_limit`, default 3), or the proof commands of 3 claims in a row failed with the same output. After the 2nd time the agent gets a warning to try a different approach. A check that prints nothing is never counted as a stall. |
+| `claims-rejected` | 3 claims were rejected (`claim_limit`, default 3): a failed verification, or a judge "no". A failing check or proof command at claim time does not count (see `stall`). The goal is probably unclear or too hard. Read `review.md`, sharpen the "Done when" items, then `/goal-resume`. |
 | `check-broken` | The check command cannot run (exit 126 / 127: not executable / not found) 2 times in a row. After the 1st time the agent is told to fix the environment. |
 | `budget` | `max_iterations` (default 50) is reached. |
 | `user-stop` | You stopped a turn in the editor. |
@@ -64,13 +64,14 @@ A goal without a check has no stall detection: there is no output to compare. `m
 
 - **`max_iterations`** (default 50). One iteration is one turn, not time. For a big overnight goal, raise it in `goal.md`.
 - **Only you start, resume or pause a goal.** A `preRequest` hook sees the raw text you type, before ECA expands a slash command. When you type `/goal` or `/goal-resume`, it records the current chat as the owner in `.eca/eca-goal/loop.json`. `/goal-resume` and `/goal-pause` also change the status mechanically. The agent cannot type commands, so it cannot claim or resume a goal.
-- **Hook-owned bookkeeping.** `loop.json` holds the owner, the iteration counter, the stall counters, the rejected-claim counter, whether a verification started by the loop is pending, and "done confirmed". Only the hooks write it. Editing `goal.md` (an invented `chat_id`, a reset `iteration`) has no effect on the loop.
+- **Hook-owned bookkeeping.** `loop.json` holds the owner, the iteration counter, the stall counters, the time of the last check run, the rejected-claim counter, whether a verification started by the loop is pending, and "done confirmed". Only the hooks write it. Editing `goal.md` (an invented `chat_id`, a reset `iteration`) has no effect on the loop.
 - **Never silent.** When the loop does not run in a chat (no owner, or another chat owns the goal), it says so once in that chat, with the fix (`/goal-resume`). When the goal is paused, the owning chat is told once, with the reason: for example after a reboot, when a stopped turn paused the goal. Not after `/goal-pause`: you just typed it.
 - **Stop = pause.** If you stop a turn in the editor, the goal changes to `paused`, and the check does not run.
 - **No commits unless asked, never push.** The agent leaves its changes in the working tree for you. It commits only if your `/goal` text explicitly asks for it, and it never pushes.
 - **The claim only starts the checks.** The agent may set `status: claimed`, but that never finishes the goal. Only a verification turn that the loop started, after all mechanical checks passed, and that ends with `verified: yes`, `verdict: pass` with no blocking findings, and a check that still passes, makes the goal `done`. The loop records that in `loop.json`.
 - **No shortcuts.** If the agent writes `status: auditing` itself, the loop treats it as a claim and runs all checks. If it writes `status: done` itself, the loop does not accept it and sends it back to work. A `done` that the loop never confirmed is reported as such.
-- **The loop re-runs the proof.** Every `command:` line in `proof.md` is run by the hook, not trusted from the agent's report. The reviewer also checks that these commands really test the item (not `true`).
+- **The loop re-runs the proof.** Every `command:` line in `proof.md` is run by the hook, not trusted from the agent's report. The reviewer also checks that these commands (and, for `method: check`, the check) really test the item (not `true`).
+- **The reviewer does not re-run what the hook ran.** The verification turn tells the reviewer that the check and the proof commands already passed on this exact working tree. This is safe: those exit codes come from the hook, which is a script, not from the agent. So the rule "the agent cannot grade its own work" still holds. The reviewer spends its time on what a script cannot judge: whether those commands prove the items, and everything no command covers.
 - **Independent reviewer.** The reviewer is a fresh subagent without the chat history. It did not do the work, so it is less biased than the agent checking itself. The hook cannot prove that the agent really started a subagent: this part depends on the model following the prompt.
 - **The agent can pause itself** (`status: paused`) when it needs you.
 - The optional LLM judge can only make the loop **stricter**: it runs only on a claim, after the check and the proof commands passed. It cannot read files, so it is no replacement for the reviewer.
@@ -87,7 +88,7 @@ eca-goal runs shell commands on your machine. Know what runs, and who wrote it.
 
 ## Limits
 
-- **The check runs inside the hook, synchronously.** The chat waits while it runs. The hook timeout is 20 minutes, and the check timeout is 15 minutes. Use a narrow, fast check when you can (for example one test class, not the full suite).
+- **The check runs inside the hook, synchronously.** The chat waits while it runs. The hook timeout is 20 minutes, and the check timeout is 15 minutes. Use a narrow, fast check when you can (for example one test class, not the full suite). The hook records how long the check took (`check_secs` in `loop.json`, shown by `/goal-status`). When it takes longer than `ECA_GOAL_SLOW_CHECK` (default 120 s), the agent gets a hint, once per goal: make the check faster without sacrificing correctness, or write why not under Notes.
 - Each follow-up turn adds the check output to the chat. The context grows with each iteration. Compaction works: the goal is injected again after it.
 - `/goal` itself depends on the model following the command prompt. The hooks are tested; the model's behavior is not. This includes starting a real reviewer subagent in the verification turn: the hook checks `review.md`, but it cannot see who wrote it.
 - A claim costs at least one extra turn (the verification), plus a reviewer subagent. A hard goal also gets one "continue, or claim" turn after the check first passes, if the agent did not claim in the same turn.

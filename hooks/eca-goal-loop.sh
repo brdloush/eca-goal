@@ -9,8 +9,10 @@
 #   - status claimed -> the agent claims the goal is met and wrote proof.md.
 #                       The loop checks the proof format, runs the check, re-runs
 #                       every "command:" line of the proof, and the optional LLM
-#                       judge. Any failure rejects the claim -> back to work.
-#                       All pass -> one verification turn.
+#                       judge. Any failure -> back to work. Only a judge "no"
+#                       counts as a rejected claim; a failing check or proof
+#                       command uses the stall rule instead. All pass -> one
+#                       verification turn.
 #   - verification   -> a fresh reviewer subagent checks the proof. It sorts
 #                       problems into blocking and minor, and from round 2 on it
 #                       first checks its earlier findings (review-<N>.md). The
@@ -99,13 +101,22 @@ pause() {
 
 check=$(goal_get "$goal" check)
 
-# run_check -> rc, tail_out
+# run_check -> rc, tail_out, check_secs. The time goes to loop.json. A slow check
+# sets slow_hint; the next work followUp shows it (once per goal), not the
+# verification turn, where the agent must do no other work.
+check_secs=0; slow_hint=""
 run_check() {
   if [ -n "$check" ]; then
+    local t0=$SECONDS slow=${ECA_GOAL_SLOW_CHECK:-120}
     out=$(cd "$cwd" && timeout "${ECA_GOAL_CHECK_TIMEOUT:-900}" bash -c "$check" 2>&1 </dev/null); rc=$?
+    check_secs=$((SECONDS - t0))
+    loop_update "$loop" '.check_secs = ($s | tonumber)' --arg s "$check_secs"
     tail_out=$(tail -n "$lines" <<<"$out")
     [ "$rc" -eq 124 ] && tail_out="$tail_out
 (eca-goal: check timed out after ${ECA_GOAL_CHECK_TIMEOUT:-900}s)"
+    if [ "$check_secs" -gt "$slow" ] && [ "$(loop_get "$loop" .slow_warned)" != true ]; then
+      slow_hint="The check took ${check_secs}s. It runs after every turn, at every claim and before done. Make it faster if you can, without sacrificing correctness (run the test suite once, do not call other check scripts). If you cannot, write why under Notes."$'\n'
+    fi
   else
     rc=0; tail_out="(no check command)"
   fi
@@ -161,11 +172,13 @@ goal_set "$goal" iteration "$iter" # mirror for humans; the loop reads loop.json
 
 # followup SYSTEM_MESSAGE TEXT -> print a work followUp (TEXT + the standing rules), then exit
 followup() {
-  jq -n --arg s "$1" --arg t "$note$2" '{
+  [ -z "$slow_hint" ] || loop_update "$loop" '.slow_warned = true'
+  jq -n --arg s "$1" --arg t "$note$2$slow_hint" '{
     systemMessage: $s,
     followUp: ($t
       + "Re-read .eca/eca-goal/goal.md. Pick the next step and do it. Then update the Progress section: what you did, what worked, what failed, next step.\n"
-      + "At the end of each turn, ask yourself: is every \"Done when\" item met? If yes, write .eca/eca-goal/proof.md (one `## ` section per \"Done when\" item, each with `method: command | file-read | judgement`, `command:` lines for method command, and `evidence:`), set `status: claimed`, and end your turn. The loop then verifies your claim.\n"
+      + "At the end of each turn, ask yourself: is every \"Done when\" item met? If yes, write .eca/eca-goal/proof.md (one `## ` section per \"Done when\" item, each with `method: check | command | file-read | judgement`, `command:` lines for method command, and `evidence:`; use `check` when the goal check proves the item, and `command` only for cheap commands the check does not cover), set `status: claimed`, and end your turn. The loop then verifies your claim.\n"
+      + "You do not need to run the check or the proof commands yourself just before you claim: the loop runs them right after your turn, and a failing check or proof command costs one turn, not a rejected claim.\n"
       + "Delegate independent research to subagents with `eca__spawn_agent`: `explorer` to find files and read code (read-only), `general` for multi-step side tasks. When the parts are independent (for example, several screens or modules to map), start them in the same response so they run in parallel. Give each one a precise task and ask for a short result. Keep all edits, and the change -> check -> fix cycle, in the main agent.\n"
       + "Work autonomously. When you face a choice you can make yourself, pick the most reasonable option, write it under Notes with a one-line reason, and continue. Set `status: paused` and `paused_reason: needs-human` ONLY when you need something only a human can give (credentials, access, an irreversible or outward-facing action, requirements that conflict).\n"
       + "Do not commit unless the goal text asks for it. Never push.")
@@ -184,22 +197,30 @@ reject() {
   note="${note}Your claim was rejected (${n}/${limit}): $1."$'\n'
 }
 
+# stall_step SIG -> sets stall: how many failures in a row had this same signature
+# (exit code + output), this one included. Kept in loop.json.
+stall_step() {
+  local prev
+  if [ "$1" = "$(loop_get "$loop" .stall_sig)" ]; then
+    prev=$(loop_get "$loop" .stall_count); stall=$(( ${prev:-0} + 1 ))
+  else
+    stall=1
+  fi
+  loop_update "$loop" '.stall_sig = $s | .stall_count = ($n | tonumber)' --arg s "$1" --arg n "$stall"
+}
+
 # check_failed -> stall detection, then the "not met" followUp. The same failure
 # (exit code + output) again and again means the last turns changed nothing the
 # check can see. A broken check (command not found / not executable) pauses
 # sooner. A check with no output gives nothing to compare, so it is never
 # counted as a stall (max_iterations still applies).
 check_failed() {
-  local sig stall prev limit hint=""
-  sig=$(printf '%s\n%s' "$rc" "$tail_out" | cksum | cut -d' ' -f1)
+  local stall limit hint=""
   if [ -z "$tail_out" ] && [ "$rc" != 126 ] && [ "$rc" != 127 ]; then
-    stall=0
-  elif [ "$sig" = "$(loop_get "$loop" .stall_sig)" ]; then
-    prev=$(loop_get "$loop" .stall_count); stall=$(( ${prev:-0} + 1 ))
+    stall=0; loop_update "$loop" '.stall_sig = "" | .stall_count = 0'
   else
-    stall=1
+    stall_step "$(printf '%s\n%s' "$rc" "$tail_out" | cksum | cut -d' ' -f1)"
   fi
-  loop_update "$loop" '.stall_sig = $s | .stall_count = ($n | tonumber)' --arg s "$sig" --arg n "$stall"
   limit=$(goal_get "$goal" stall_limit); limit=${limit:-3}
   case "$rc" in
     126|127) limit=2
@@ -233,8 +254,9 @@ validate_proof() {
     [ "$kind" = S ] || continue
     case "$method" in
       command) grep -qF "C$tab$title$tab" <<<"$parsed" || echo "- \"$title\": \`method: command\` needs at least one \`command:\` line" ;;
+      check) [ -n "$check" ] || echo "- \"$title\": \`method: check\`, but goal.md has no check command (use command, file-read or judgement)" ;;
       file-read|judgement) ;;
-      *) echo "- \"$title\": \`method:\` must be command, file-read or judgement (got \"$method\")" ;;
+      *) echo "- \"$title\": \`method:\` must be check, command, file-read or judgement (got \"$method\")" ;;
     esac
     [ "$ev" = 1 ] || echo "- \"$title\": no \`evidence:\` line"
   done <<<"$parsed"
@@ -282,7 +304,7 @@ $problems
 Format, one section per \"Done when\" item:
 \`\`\`
 ## <the Done when item>
-method: command | file-read | judgement
+method: check | command | file-read | judgement
 command: <one shell line that exits 0 only if the item is met; repeat the line for more; method command only>
 evidence: <what you saw: command output, file:line, or your reasoning>
 confidence: high | medium | low
@@ -291,31 +313,47 @@ Fix the proof, then set \`status: claimed\` again.
 "
 fi
 
-# 2) the check
+# 2) the check. A failing check or proof command sends the agent back to work,
+#    but it is not a rejected claim (claim_limit): the stall rule stops a loop.
+#    So the agent does not need to run them itself before it claims.
 run_check
 if [ "$rc" -ne 0 ]; then
-  reject "the check fails"
+  goal_set "$goal" status active
+  note="${note}Your claim was not accepted: the check fails. This does not count as a rejected claim."$'\n'
   check_failed
 fi
-loop_update "$loop" '.stall_count = 0'
 
-# 3) every "command:" line of the proof, run by the loop itself
+# 3) every "command:" line of the proof, run by the loop itself. A command that
+#    is listed more than once (for several items) runs only once.
 fails=""; ncmd=0
+ran_cmd=(); ran_rc=(); ran_out=()   # indexed arrays: no bash 4 needed
 while IFS=$'\t' read -r kind title cmd; do
   [ "$kind" = C ] || continue
-  ncmd=$((ncmd + 1))
-  o=$(cd "$cwd" && timeout "${ECA_GOAL_CHECK_TIMEOUT:-900}" bash -c "$cmd" 2>&1 </dev/null); r=$?
-  [ "$r" -eq 0 ] || fails+="- \"$title\": \`$cmd\` exited $r. Last output:
+  k=0
+  while [ "$k" -lt "$ncmd" ] && [ "${ran_cmd[$k]}" != "$cmd" ]; do k=$((k + 1)); done
+  if [ "$k" -eq "$ncmd" ]; then
+    ran_cmd[$k]=$cmd
+    ran_out[$k]=$(cd "$cwd" && timeout "${ECA_GOAL_CHECK_TIMEOUT:-900}" bash -c "$cmd" 2>&1 </dev/null)
+    ran_rc[$k]=$?
+    ncmd=$((ncmd + 1))
+  fi
+  [ "${ran_rc[$k]}" -eq 0 ] || fails+="- \"$title\": \`$cmd\` exited ${ran_rc[$k]}. Last output:
 \`\`\`
-$(tail -n 20 <<<"$o")
+$(tail -n 20 <<<"${ran_out[$k]}")
 \`\`\`
 "
 done <<<"$parsed"
 if [ -n "$fails" ]; then
-  reject "a proof command fails"
-  followup "Goal claim rejected: a proof command fails (iteration $iter/$max)." "The loop re-ran the commands in your proof. Some fail, so these items are not met (iteration $iter/$max):
-$fails"
+  goal_set "$goal" status active
+  stall_step "$(printf '%s' "$fails" | cksum | cut -d' ' -f1)"
+  limit=$(goal_get "$goal" stall_limit); limit=${limit:-3}
+  [ "$stall" -lt "$limit" ] || pause stall "a proof command failed $stall times in a row with the same output."
+  hint=""
+  [ "$stall" -ge 2 ] && hint="WARNING: the same proof commands fail with the same output as at your previous claim. Fix the work, or the command if the command is wrong. If this happens again, the goal pauses."$'\n'
+  followup "Goal claim not accepted: a proof command fails (iteration $iter/$max)." "Your claim was not accepted: the loop re-ran the commands in your proof, and some fail, so these items are not met (iteration $iter/$max). This does not count as a rejected claim.
+$fails$hint"
 fi
+loop_update "$loop" '.stall_count = 0'
 
 # 4) Optional LLM judge (OpenAI-compatible endpoint). It runs only after the
 #    mechanical checks passed, so it can only make the loop stricter.
@@ -356,15 +394,28 @@ vround=$(( $(review_history "$state_dir" | wc -l) + 1 ))
 loop_update "$loop" '.audit_pending = true'
 goal_set "$goal" verified no
 goal_set "$goal" status auditing
-jq -n --arg i "$iter" --arg n "$ncmd" --arg c "${check:-(none)}" --arg note "$note" --arg h "$hist" --argjson r "$vround" '{
+# The reviewer is told what the loop already ran on this tree, so it does not
+# run it again. That is safe: these exit codes come from the hook (a script),
+# not from the agent, so the agent still does not grade its own work.
+jq -n --arg i "$iter" --arg n "$ncmd" --arg c "${check:-(none)}" --arg note "$note" --arg h "$hist" --argjson r "$vround" \
+  --arg hc "${check:+1}" --arg secs "$check_secs" --arg ctail "$(tail -n 20 <<<"$tail_out")" '{
   systemMessage: "Goal claim passed the mechanical checks (iteration \($i)). Running the verification (review round \($r)).",
   followUp: ($note
     + "Your claim passed the mechanical checks: the check `\($c)` passes, and the loop re-ran the \($n) command(s) in your proof. Now the verification (review round \($r)). Do no other work in this turn, except the minor fixes in step 3.\n"
     + "1. Start ONE fresh reviewer with `eca__spawn_agent` (`general`). Give it only: the Objective and the \"Done when\" items from .eca/eca-goal/goal.md, the path .eca/eca-goal/proof.md"
     + (if $h != "" then ", and the earlier reviews: \($h)" else "" end)
     + ". Do NOT give it your chat history or your opinion. Tell it:\n"
-    + "   - Inspect the working tree yourself (git diff, read files, run commands). Trust nothing in the proof without checking it.\n"
-    + "   - For each \"Done when\" item, reply `ok` or `not-ok` with a one-line reason. For `command` items, check that the command really proves the item (it is not trivially true, it tests the right thing). For `file-read` and `judgement` items, read the files and judge them yourself. If the evidence is weak, the item is `not-ok`.\n"
+    + "   - Inspect the working tree yourself (git diff, read files, run commands). Trust nothing the proof claims without checking it.\n"
+    + (if $hc != "" or $n != "0" then
+        "   - The loop (a script, not the agent) already ran "
+      + ([ (if $hc != "" then "the check `\($c)` (exit 0, \($secs)s)" else empty end),
+           (if $n != "0" then "the \($n) proof command(s)" else empty end) ] | join(" and "))
+      + " on this exact working tree, and they pass. Do not re-run them: read them, and decide whether they really prove the items. Run commands only for what they do not cover (one focused test, one grep)."
+      + (if $hc != "" and ($secs | tonumber) >= 60 then " If you must run a long command (like the check), use a timeout above \($secs)s." else "" end)
+      + "\n"
+      else "" end)
+    + (if $hc != "" then "   - The last lines of the check output:\n```\n\($ctail)\n```\n" else "" end)
+    + "   - For each \"Done when\" item, reply `ok` or `not-ok` with a one-line reason. For `command` items, check that the command really proves the item (it is not trivially true, it tests the right thing). For `check` items, read the check (the command, and the script it calls) and confirm that it really tests this item. For `file-read` and `judgement` items, read the files and judge them yourself. If the evidence is weak, the item is `not-ok`.\n"
     + "   - Look for concrete errors in what the goal produced (a wrong fact, a wrong `file:line` reference, a broken example, code that does not work), and sort every problem into one of two classes, each with the exact place and the fix. BLOCKING: a \"Done when\" item is not met, a check is weakened or broken, or the proof claims something false. MINOR: a wrong number or wording in prose, an outdated comment, style. Only blocking problems make an item `not-ok`.\n"
     + (if $r > 1 then
         "   - This is review round \($r). Read the earlier reviews first. Start the answer with `## Previous findings`: for each earlier blocking finding, `fixed` or `not fixed`, with a one-line reason. A blocking finding that is not fixed stays blocking.\n"
@@ -376,7 +427,7 @@ jq -n --arg i "$iter" --arg n "$ncmd" --arg c "${check:-(none)}" --arg note "$no
     + (if $r > 1 then "`## Previous findings`, " else "" end)
     + "`## Items`, `## Blocking`, `## Minor`, `## Weak points`. Write `- none` under an empty list. `verdict: pass` only if `## Blocking` is empty.\n"
     + "2. Write the reviewer answer, unchanged, to .eca/eca-goal/review.md.\n"
-    + "3. If the verdict is pass: fix the minor findings, but only in prose, docs and comments (no code, no checks, no tests). Then set `verified: yes` in the header of .eca/eca-goal/goal.md, append 1-5 durable, repo-specific lessons (do / do not) to .eca/rules/eca-goal-lessons.md (create it if missing), and write a short final summary that lists any minor finding you did not fix. The loop runs the check once more before it marks the goal done.\n"
+    + "3. If the verdict is pass: fix the minor findings, but only in prose, docs and comments (no code, no checks, no tests). Then set `verified: yes` in the header of .eca/eca-goal/goal.md, append 1-5 durable, repo-specific lessons (do / do not) to .eca/rules/eca-goal-lessons.md (create it if missing). Write lessons about this repo (its code, tools, tests and traps), not about the goal loop itself (claiming, proofs, re-running commands): its instructions cover that, and they can change. Then write a short final summary that lists any minor finding you did not fix. The loop runs the check once more before it marks the goal done.\n"
     + "   If the verdict is fail: leave `verified: no` and end the turn. The loop sends you back to work with the findings.\n"
     + "The goal is done ONLY if this turn ends with `verified: yes`, review.md says `verdict: pass` with an empty `## Blocking` list, and the check still passes.")
 }'

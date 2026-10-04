@@ -178,35 +178,57 @@ check "passing check, no claim -> nudge to claim, no verification" jq -e '.follo
 check "  status stays active" test "$(get status)" = active
 set_status claimed
 out=$(input | "$LOOP")
-check "claim without proof.md -> not accepted, format shown" jq -e '.followUp | contains("proof.md is missing") and contains("method: command | file-read | judgement")' <<<"$out"
+check "claim without proof.md -> not accepted, format shown" jq -e '.followUp | contains("proof.md is missing") and contains("method: check | command | file-read | judgement")' <<<"$out"
 check "  status active, not counted as a rejected claim" test "$(get status)/$(lget claim_rejects)" = active/
 printf '## marker exists\nmethod: vibes\n## extra\nmethod: command\nevidence: x\n' >"$G/proof.md"; set_status claimed
 out=$(input | "$LOOP")
-check "bad proof -> each problem listed" jq -e '.followUp | contains("must be command, file-read or judgement") and contains("no `evidence:` line") and contains("needs at least one `command:` line")' <<<"$out"
+check "bad proof -> each problem listed" jq -e '.followUp | contains("must be check, command, file-read or judgement") and contains("no `evidence:` line") and contains("needs at least one `command:` line")' <<<"$out"
 printf -- '- second item\n' >>"$G/goal.md"; sed -i 's/^## Progress$/- second item\n## Progress/' "$G/goal.md"; claim
 out=$(input | "$LOOP")
 check "proof with fewer sections than Done when items -> not accepted" jq -e '.followUp | contains("1 `## ` sections, but goal.md has 2")' <<<"$out"
-sed -i '/^- second item$/d' "$G/goal.md"
+printf '## marker exists\nmethod: check\nevidence: the check tests it\n## second item\nmethod: command\ncommand: echo x >>%s/ran-count\nevidence: x\n## third\nmethod: command\ncommand: echo x >>%s/ran-count\nevidence: x\n' "$T" "$T" >"$G/proof.md"
+sed -i 's/^## Progress$/- third item\n## Progress/' "$G/goal.md"; set_status claimed; rm -f "$T/ran-count"
+out=$(input | "$LOOP")
+check "method: check is accepted -> verification turn" jq -e '.followUp | contains("fresh reviewer")' <<<"$out"
+check "  the reviewer confirms that the check tests check items" jq -e '.followUp | contains("For `check` items, read the check")' <<<"$out"
+check "  a command listed for two items runs once" test "$(wc -l <"$T/ran-count")" = 1
+check "  and counts once" jq -e '.followUp | contains("re-ran the 1 command")' <<<"$out"
+set_status active; sed -i '/^- second item$/d; /^- third item$/d' "$G/goal.md"
+jq '.audit_pending = false' "$G/loop.json" >"$T/l.json" && mv "$T/l.json" "$G/loop.json"   # undo the started verification
 claim "test -f no-such-file"
 out=$(input | "$LOOP")
-check "claim with a failing proof command -> rejected" jq -e '.followUp | contains("re-ran the commands in your proof") and contains("test -f no-such-file")' <<<"$out"
-check "  counted: claim_rejects 1, status active" test "$(lget claim_rejects)/$(get status)" = 1/active
-check "  followUp says rejected 1/3" jq -e '.followUp | contains("rejected (1/3)")' <<<"$out"
+check "claim with a failing proof command -> not accepted, back to work" jq -e '.followUp | contains("re-ran the commands in your proof") and contains("test -f no-such-file")' <<<"$out"
+check "  NOT counted as a rejected claim, status active" test "$(lget claim_rejects)/$(get status)" = /active
+check "  followUp says it does not count" jq -e '.followUp | contains("does not count as a rejected claim")' <<<"$out"
+check "  the standing rules say: no need to pre-run the check" jq -e '.followUp | contains("You do not need to run the check or the proof commands yourself")' <<<"$out"
+claim "test -f no-such-file"; out=$(input | "$LOOP")
+check "  the same proof failure again -> stall warning" jq -e '.followUp | contains("WARNING: the same proof commands fail")' <<<"$out"
+check "  stall_count 2, still no rejected claim" test "$(lget stall_count)/$(lget claim_rejects)" = 2/
+claim "test -f no-such-file"; out=$(input | "$LOOP")
+check "  third time -> paused stall" test "$(get status)/$(get paused_reason)" = paused/stall
+typed chat-1 "/goal-resume" >/dev/null
 echo old >"$G/review.md"; claim "test -f marker"
 out=$(input | "$LOOP")
 check "valid claim -> verification turn with a fresh reviewer" jq -e '.followUp | contains("fresh reviewer") and contains("eca__spawn_agent") and contains("re-ran the 1 command")' <<<"$out"
 check "  reviewer sorts problems into blocking and minor" jq -e '.followUp | contains("BLOCKING:") and contains("MINOR:") and contains("Only blocking problems make an item `not-ok`")' <<<"$out"
+check "  the reviewer is told what already passed, and not to re-run it" jq -e '.followUp | contains("already ran the check `test -f marker` (exit 0, ") and contains("and the 1 proof command(s) on this exact working tree") and contains("Do not re-run them")' <<<"$out"
+check "  a fast check: no timeout advice" jq -e '.followUp | contains("use a timeout above") | not' <<<"$out"
+check "  the reviewer gets the check output" jq -e '.followUp | contains("The last lines of the check output")' <<<"$out"
+check "  lessons are about the repo, not the loop" jq -e '.followUp | contains("eca-goal-lessons.md") and contains("not about the goal loop")' <<<"$out"
 check "  round 1: no history, no convergence rule" jq -e '.followUp | contains("review round 1") and (contains("Previous findings") | not)' <<<"$out"
 check "  status auditing, verified no, audit_pending" test "$(get status)/$(get verified)/$(lget audit_pending)" = auditing/no/true
 check "  old review.md removed" test ! -e "$G/review.md"
 review pass
 out=$(input | "$LOOP")
 check "verification: review pass but no verified: yes -> rejected" jq -e '.followUp | contains("ended without `verified: yes`") and contains("Reviewer findings")' <<<"$out"
-check "  status active, claim_rejects 2" test "$(get status)/$(lget claim_rejects)" = active/2
+check "  status active, claim_rejects 1" test "$(get status)/$(lget claim_rejects)" = active/1
 claim "test -f marker"; input | "$LOOP" >/dev/null
 sed -i 's/^verified: no$/verified: yes/' "$G/goal.md"; review fail
 out=$(input | "$LOOP")
-check "verification: verified: yes but verdict fail -> rejected, not done" jq -e '.systemMessage | contains("does not say `verdict: pass`")' <<<"$out"
+check "verification: verified: yes but verdict fail -> rejected, not done" jq -e '.followUp | contains("does not say `verdict: pass`")' <<<"$out"
+check "  claim_rejects 2" test "$(get status)/$(lget claim_rejects)" = active/2
+claim "test -f marker"; input | "$LOOP" >/dev/null; review fail
+out=$(input | "$LOOP")
 check "  third rejection -> paused claims-rejected" test "$(get status)/$(get paused_reason)" = paused/claims-rejected
 typed chat-1 "/goal-resume" >/dev/null
 check "/goal-resume resets claim_rejects and removes review.md" test "$(lget claim_rejects)" = "" -a ! -e "$G/review.md"
@@ -269,18 +291,24 @@ check "  no notice after /goal-pause (manual)" test -z "$(input | "$LOOP")"
 
 echo "== hooks: goals without a check command"
 goal active ""
+printf '## marker exists\nmethod: check\nevidence: x\n' >"$G/proof.md"; set_status claimed
+out=$(input | "$LOOP")
+check "method: check without a check command -> not accepted" jq -e '.followUp | contains("`method: check`, but goal.md has no check command")' <<<"$out"
+check "  not counted as a rejected claim" test "$(get status)/$(lget claim_rejects)" = active/
 out=$(input | "$LOOP")
 check "no check -> work followUp, reviewer decides" jq -e '.followUp | contains("has no check command") and contains("status: claimed")' <<<"$out"
 check "  still active" test "$(get status)" = active
 claim
 out=$(input | "$LOOP")
 check "judgement-only claim, no check -> verification turn" jq -e '.followUp | contains("fresh reviewer") and contains("check `(none)`")' <<<"$out"
+check "  nothing ran, so the reviewer is not told to skip anything" jq -e '.followUp | (contains("already ran") or contains("The last lines of the check output")) | not' <<<"$out"
 sed -i 's/^verified: no$/verified: yes/' "$G/goal.md"; review pass
 input | "$LOOP" >/dev/null
 check "  reviewer pass -> done" test "$(get status)/$(lget done_confirmed)" = done/true
 goal active "false"; claim
 out=$(input | "$LOOP")
-check "claim while the check fails -> rejected with the check output" jq -e '.followUp | contains("rejected (1/3): the check fails") and contains("exited 1")' <<<"$out"
+check "claim while the check fails -> back to work with the check output" jq -e '.followUp | contains("not accepted: the check fails") and contains("exited 1")' <<<"$out"
+check "  not counted as a rejected claim" test "$(get status)/$(lget claim_rejects)" = active/
 goal active "true"; claim; input | "$LOOP" >/dev/null   # -> auditing
 set_status active; review fail
 out=$(input | "$LOOP")
@@ -368,6 +396,17 @@ check "  stall_count stays 1" test "$(lget stall_count)" = 1
 goal active "test -f never-there"
 for _ in 1 2 3; do input | "$LOOP" >/dev/null; done
 check "a silent failing check is never a stall" test "$(get status)" = active
+check "  a fast check: time recorded, no slow-check hint" test "$(lget check_secs)" = 0
+goal active "sleep 1; echo slow; false"
+out=$(input | ECA_GOAL_SLOW_CHECK=0 "$LOOP")
+check "slow check -> hint with the time, keep it correct" jq -e '.followUp | test("The check took [0-9]+s") and contains("without sacrificing correctness")' <<<"$out"
+check "  time recorded in loop.json" test "$(lget check_secs)" -ge 1
+out=$(input | ECA_GOAL_SLOW_CHECK=0 "$LOOP")
+check "  the hint is given only once per goal" jq -e '.followUp | contains("The check took") | not' <<<"$out"
+goal active "sleep 1; true"; claim
+out=$(input | ECA_GOAL_SLOW_CHECK=0 "$LOOP")
+check "slow check at a claim -> no hint in the verification turn" jq -e '(.followUp | contains("fresh reviewer")) and (.followUp | contains("The check took") | not)' <<<"$out"
+check "  the hint is kept for a later work turn" test "$(lget slow_warned)" = ""
 
 goal active "no-such-command-eca-goal"
 out=$(input | "$LOOP")

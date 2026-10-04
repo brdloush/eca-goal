@@ -18,7 +18,7 @@ You must **type** the command yourself. Asking the agent in plain words ("please
 | `proof.md` | the agent, when it claims | why it thinks each item is met ([The proof](#the-proof)) |
 | `review.md` | the agent, in the verification turn | the fresh reviewer's answer, starting with `verdict: pass` or `verdict: fail` ([The review](#the-review)) |
 | `review-<N>.md` | the hooks, when a verification fails | earlier reviews (round N); the next reviewer checks them first |
-| `loop.json` | only the hooks | owner, counters, "done confirmed" |
+| `loop.json` | only the hooks | owner, counters, the time of the last check run, "done confirmed" |
 
 `/goal` removes an old `proof.md`, `review.md` and `review-<N>.md`. `/goal-resume` removes only `review.md`, so the review history survives a resume. A `.gitignore` with `*` keeps all of them out of git. **Everything the goal produces (scripts, tests, check helpers) belongs in the repo, not in this directory**, because files there are never committed. `/goal` tells the agent so. You do not have to edit your `.gitignore`. Keep `.eca/rules/eca-goal-lessons.md` in git if you want to share the lessons.
 
@@ -50,6 +50,11 @@ You can edit the file by hand at any time. Decisions you make while a goal runs 
 When the agent claims the goal, `proof.md` has one section per "Done when" item:
 
 ```
+## all tests in test/auth pass
+method: check
+evidence: the goal check runs test/auth: 42 tests, 0 failures
+confidence: high
+
 ## every public function in api/ has a docstring
 method: command
 command: ./scripts/check-docstrings.sh api/
@@ -64,11 +69,14 @@ confidence: medium
 
 | `method` | Use it when | What the loop does |
 |---|---|---|
-| `command` | a command can prove the item | the hook re-runs each `command:` line; one failure rejects the claim |
+| `check` | the goal check proves the item | nothing extra: the hook runs the check anyway. The reviewer confirms that the check really tests the item |
+| `command` | a cheap command that the check does not cover proves the item (a grep, one focused test) | the hook re-runs each `command:` line; one failure sends the agent back to work |
 | `file-read` | the proof is in specific files | the reviewer reads those files |
-| `judgement` | neither works | the reviewer judges it |
+| `judgement` | nothing else works | the reviewer judges it |
 
-The hook checks the format: at least as many sections as "Done when" items, a valid `method:` and an `evidence:` line in each, and at least one `command:` line for `method: command`. `confidence` is for the reviewer and for you.
+Prefer `check` over a `command:` that repeats what the check already runs (the test suite, an earlier goal's check): every `command:` line runs again at every claim. The hook runs a command that is listed for several items only once per claim.
+
+The hook checks the format: at least as many sections as "Done when" items, a valid `method:` and an `evidence:` line in each, at least one `command:` line for `method: command`, and a check command in `goal.md` for `method: check`. `confidence` is for the reviewer and for you.
 
 ## The review
 
@@ -99,9 +107,10 @@ The hook reads only the `verdict:` line and the `## Blocking` list. The rest is 
 The check is the strongest proof, so its quality matters most. `/goal` asks the agent to follow these rules, and you can check them in `goal.md`:
 
 - **Put the guards in the check.** A rule like "do not change the legacy code" is invisible to the loop unless the check tests it: `git diff --quiet -- src/legacy/ && ./run-tests.sh`. Without guards, an agent can reach the exit code by a shortcut.
+- **Do not call other goal checks from the check.** When goals follow each other in one repo, the easy guard is "the checks of the earlier goals still pass". But each of those checks runs the test suite again, and if each new check calls all earlier ones, the cost doubles with every goal (1, 2, 4, 8, 16 suite runs). Run the test suite and the linter **once**. Keep the guards of earlier goals by copying their cheap asserts (greps, file checks), or call them with a flag that skips their suite. For a repo with several goal checks, keep one shared guard script (for example `scripts/guards.sh`: the full test suite and the linter, each run once), and call it once from each goal check.
 - **No empty passes.** The check must fail if it examined too little, for example if it found fewer tests or items than expected. Otherwise a broken search can pass by accident.
 - **Show progress.** Print what is still missing (failing test names, a count of open items). Stall detection compares the output, so a check whose output changes with progress never stalls by mistake.
-- **Fast and narrow.** It runs after every turn.
+- **Fast and narrow.** It runs after every turn, at every claim and before done. Target: about a minute.
 - **One goal per task.** A list of independent tasks does not fit one exit code or one review. Run one goal per task, each with its own check.
 - **Partial is fine.** If a command can prove only part of the goal, check that part. The reviewer handles the rest.
 

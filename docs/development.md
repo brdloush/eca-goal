@@ -3,7 +3,7 @@
 ## Tests
 
 ```bash
-test/run-tests.sh              # installer + hooks, in temp dirs (about 135 checks)
+test/run-tests.sh              # installer + hooks, in temp dirs (about 175 checks)
 test/run-tests.sh --no-schema  # skip the checks that need a schema validator
 test/e2e.py /path/to/eca       # end-to-end against a real `eca server`
 ```

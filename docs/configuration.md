@@ -5,8 +5,8 @@
 | Key | Default | Meaning |
 |---|---|---|
 | `max_iterations` | `50` | Turns before the goal pauses (`budget`). One iteration is one turn. |
-| `stall_limit` | `3` | Identical failed checks in a row before the goal pauses (`stall`). |
-| `claim_limit` | `3` | Rejected claims before the goal pauses (`claims-rejected`). |
+| `stall_limit` | `3` | Identical failed checks (or identical proof-command failures at claims) in a row before the goal pauses (`stall`). |
+| `claim_limit` | `3` | Rejected claims (failed verifications, judge "no") before the goal pauses (`claims-rejected`). |
 | `judge` | `off` | `local` turns on the optional LLM judge (below). |
 
 ## Optional LLM judge
@@ -29,4 +29,5 @@ The hooks read these variables from **ECA's environment**:
 | `ECA_GOAL_JUDGE_API_KEY` | (none) | Sent as `Authorization: Bearer ...`. |
 | `ECA_GOAL_JUDGE_TIMEOUT` | `180` | Seconds. |
 | `ECA_GOAL_CHECK_TIMEOUT` | `900` | Seconds for the check command. |
+| `ECA_GOAL_SLOW_CHECK` | `120` | Seconds. A check that takes longer gets a hint to the agent, once per goal: make it faster without sacrificing correctness, or write why not under Notes. Set a large number to turn the hint off. |
 | `ECA_GOAL_OUTPUT_LINES` | `60` | Lines of check output sent back to the agent. |

@@ -8,7 +8,8 @@
 #                body (Plan, Progress, ...) can never be mistaken for a state key.
 #   loop.json  - loop bookkeeping, written ONLY by the hooks: which chat owns the
 #                goal (set when you type /goal or /goal-resume), the iteration
-#                counter, stall detection, and whether "done" was confirmed by
+#                counter, stall detection, the time of the last check run
+#                (check_secs), and whether "done" was confirmed by
 #                the loop. The agent cannot turn the loop off by editing goal.md.
 #   proof.md   - written by the agent when it claims the goal: one "## " section
 #                per "Done when" item, with method:, command: and evidence: lines.

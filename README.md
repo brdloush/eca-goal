@@ -40,11 +40,11 @@ flowchart TD
     S -- yes --> P1([paused: stall])
 
     F -- no --> T3([↻ next turn])
-    F -- yes --> M{⚙️ check + proof commands<br/>🤖 + optional judge pass?}:::script
+    F -- yes --> M{⚙️ check + proof<br/>commands pass?}:::script
+    M -- no --> S
     M -- yes --> V[🤖 Verification turn:<br/>fresh reviewer, knows<br/>its earlier reviews]:::llm
-    M -- no --> R[⚙️ claim rejected<br/>review kept as review-N.md]:::script
     V --> D{⚙️ pass, no blocking,<br/>check still ok?}:::script
-    D -- no --> R
+    D -- no --> R[⚙️ claim rejected<br/>review kept as review-N.md]:::script
     D -- yes --> DONE([done ✔<br/>lessons written])
     R --> L{⚙️ 3 rejected<br/>claims?}:::script
     L -- no --> T4([↻ next turn])
@@ -57,7 +57,7 @@ flowchart TD
 
 👤 you · 🤖 LLM (the agent, or the fresh reviewer) · ⚙️ hook script. Every decision is made by a script; the LLM only works and reviews.
 
-**↻ next turn** means: back to "Agent works one turn". The diagram shows the main path. The loop also pauses on `max_iterations`, when you stop a turn, when the agent needs a human, and on a check that cannot run (see [the pause reasons](docs/how-it-works.md#autonomy-and-when-it-stops)). [How it works](docs/how-it-works.md) has every step, including ownership and the goal re-injected after compaction.
+**↻ next turn** means: back to "Agent works one turn". The diagram shows the main path. A failing check or proof command at a claim is not a rejected claim: it goes through the same stall rule as a failing check. The optional LLM judge (off by default) runs after the proof commands; its "no" counts as a rejected claim. The loop also pauses on `max_iterations`, when you stop a turn, when the agent needs a human, and on a check that cannot run (see [the pause reasons](docs/how-it-works.md#autonomy-and-when-it-stops)). [How it works](docs/how-it-works.md) has every step, including ownership and the goal re-injected after compaction.
 
 ## Quick start
 
@@ -83,7 +83,7 @@ The installer only adds eca-goal's own hooks to `config.json`, checks the JSON b
 | Command | What it does |
 |---------|--------------|
 | `/goal <text>` | Start a goal. The agent asks questions if a "Done when" item is too vague. |
-| `/goal-status` | Show status (and the pause reason), which chat owns the goal, iteration, `stall_count`, rejected claims, the check command, the reviewer's last verdict and the last progress. For a `done` goal, it says whether the loop confirmed it. Changes nothing. |
+| `/goal-status` | Show status (and the pause reason), which chat owns the goal, iteration, `stall_count`, rejected claims, the check command and how long it took, the reviewer's last verdict and the last progress. For a `done` goal, it says whether the loop confirmed it. Changes nothing. |
 | `/goal-pause [reason]` | Pause the loop. |
 | `/goal-resume [instructions]` | Resume the goal **in the current chat**, with a fresh iteration budget. Also use it to verify a `done` that the loop did not confirm. |
 
